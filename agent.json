@@ -1,0 +1,11 @@
+{
+  "name": "Meeting Outcomes Orchestrator",
+  "tagline": "Turn every meeting into structured action items, research, emails, and calendar events — automatically.",
+  "description": "An intelligent post-meeting agent that analyzes your task and automatically produces the right outputs. It extracts structured action items with owners and deadlines, drafts personalized follow-up emails using attendee names, conducts multi-source research with web search and Wikipedia, generates slide outlines with HTML previews, creates one-click Google Calendar links, and produces project plans or technical documentation. Unlike simple prompt-based agents, it uses an intelligent router to determine what you actually need and orchestrates specialized tools in parallel. No API keys required for core features.",
+  "icon": "🎯",
+  "color": "indigo",
+  "category": "productivity",
+  "taskTypes": ["doc", "summary", "email", "research", "plan"],
+  "requiredIntegrations": [],
+  "pricing": { "model": "free", "label": "Free" }
+}
