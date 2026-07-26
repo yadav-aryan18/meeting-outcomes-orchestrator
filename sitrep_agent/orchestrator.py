@@ -64,6 +64,7 @@ from typing import Any
 from sitrep_agent.sdk import AgentInput, Ctx
 from sitrep_agent.tools import TOOL_REGISTRY, BaseTool, ToolResult, ToolSchema
 from sitrep_agent.tools.memory import MemoryTool
+from sitrep_agent.tools.vector_memory import VectorMemoryTool
 
 
 class DynamicOrchestrator:
@@ -124,11 +125,23 @@ class DynamicOrchestrator:
         self.ctx.log(f"orchestrator: starting dynamic orchestration for '{title}'")
         self.ctx.log(f"orchestrator: discovered {len(self.tool_schemas)} tools")
 
-        # Step 0: Retrieve historical context from memory
+        # Step 0: Retrieve historical context from memory & vector RAG
         memory = MemoryTool(ctx=self.ctx)
+        vector_memory = VectorMemoryTool(ctx=self.ctx)
+
         historical_context = await memory.get_context(input_data)
+
+        # Retrieve RAG semantic context
+        rag_query = f"{title} {description}".strip()
+        if rag_query:
+            rag_res = await vector_memory.execute(operation="search", query=rag_query, top_k=3)
+            if rag_res.success and rag_res.artifacts:
+                rag_md = rag_res.artifacts[0].get("content", "")
+                if rag_md:
+                    historical_context = (historical_context + "\n\n" + rag_md).strip()
+
         if historical_context:
-            self.ctx.log(f"orchestrator: loaded {len(historical_context)} chars of memory")
+            self.ctx.log(f"orchestrator: loaded {len(historical_context)} chars of memory/RAG context")
 
         # Step 1: Build the system prompt with all tool schemas
         system_prompt = self._build_system_prompt()
@@ -223,10 +236,10 @@ class DynamicOrchestrator:
         # Parse artifacts
         artifacts = self._extract_artifacts(final_response)
 
-        # If no artifacts parsed, generate fallback from tool results
+        # If no artifacts parsed, generate fallback from tool results or local deterministic tools
         if not artifacts:
             self.ctx.log("orchestrator: no artifacts parsed, generating fallback")
-            artifacts = self._generate_fallback_artifacts(all_tool_results)
+            artifacts = await self._generate_fallback_artifacts(all_tool_results, input_data)
 
         # Step 5: Post-processing — external integrations
         await self._post_process(
@@ -236,11 +249,18 @@ class DynamicOrchestrator:
             all_results=all_tool_results,
         )
 
-        # Step 6: Persist to memory
-        self.ctx.log("orchestrator: persisting to memory")
+        # Step 6: Persist to memory & vector store
+        self.ctx.log("orchestrator: persisting to memory & vector RAG")
         await memory.store_meeting(
             input_data=input_data,
             action_items=all_action_items,
+        )
+        await vector_memory.execute(
+            operation="store",
+            meeting_data={
+                "task": input_data.task,
+                "summary": input_data.summary,
+            },
         )
 
         self.ctx.log(f"orchestrator: complete — returning {len(artifacts)} artifacts")
@@ -522,19 +542,19 @@ Then output <done/> to signal completion.
         self.ctx.log(f"orchestrator: calling '{tool_name}' with args {list(args.keys())}")
 
         # Inject common context if the tool expects it
-        if tool_name in ("email", "action_items", "slides", "research") and "llm" not in args:
+        if tool_name in ("email", "action_items", "slides", "research", "email_sender") and "llm" not in args:
             args["llm"] = self.llm
 
-        if tool_name in ("email", "action_items", "slides") and "attendees" not in args:
+        if tool_name in ("email", "action_items", "slides", "hubspot") and "attendees" not in args:
             args["attendees"] = input_data.attendees
 
-        if tool_name in ("email", "action_items", "slides", "research", "notion", "jira") and "summary" not in args:
+        if tool_name in ("email", "action_items", "slides", "research", "notion", "jira", "linear", "hubspot") and "summary" not in args:
             args["summary"] = input_data.summary
 
         if tool_name in ("email", "action_items", "slides") and "task_title" not in args:
             args["task_title"] = args.get("title") or input_data.task.get("title", "Draft")
 
-        if tool_name in ("calendar", "calendar_api", "notion") and "title" not in args:
+        if tool_name in ("calendar", "calendar_api", "notion", "hubspot") and "title" not in args:
             args["title"] = args.get("task_title") or input_data.task.get("title", "Draft")
 
         if tool_name in ("research", "web_search") and "query" not in args and "topic" in args:
@@ -579,11 +599,13 @@ Then output <done/> to signal completion.
 
     # ── Fallback Artifact Generation ────────────────────────────────────
 
-    def _generate_fallback_artifacts(self, results: list[dict]) -> list[dict]:
+    async def _generate_fallback_artifacts(
+        self, results: list[dict], input_data: AgentInput | None = None
+    ) -> list[dict]:
         """Generate artifacts from tool results when LLM synthesis fails.
 
-        This ensures the user always gets useful output even if the
-        LLM fails to produce proper <artifacts> tags.
+        If no artifacts exist from tool results, runs deterministic local tools
+        (ActionItemsTool, EmailTool) to ensure useful output is always returned.
         """
         artifacts = []
         for result in results:
@@ -602,6 +624,36 @@ Then output <done/> to signal completion.
                 seen.add(key)
                 unique.append(art)
 
+        if unique:
+            return unique
+
+        # Guaranteed Fallback: Execute local tools on input_data
+        if input_data and input_data.summary:
+            title = input_data.task.get("title", "Meeting Outcome")
+            self.ctx.log("orchestrator: running local fallback tools for guaranteed artifacts")
+
+            ai_tool = self.tool_instances.get("action_items")
+            if ai_tool:
+                try:
+                    res = await ai_tool.execute(summary=input_data.summary, task_title=title)
+                    if res.artifacts:
+                        unique.extend(res.artifacts)
+                except Exception as e:
+                    self.ctx.log(f"orchestrator: fallback action_items error — {e}")
+
+            email_tool = self.tool_instances.get("email")
+            if email_tool:
+                try:
+                    res = await email_tool.execute(
+                        summary=input_data.summary,
+                        task_title=title,
+                        attendees=input_data.attendees,
+                    )
+                    if res.artifacts:
+                        unique.extend(res.artifacts)
+                except Exception as e:
+                    self.ctx.log(f"orchestrator: fallback email error — {e}")
+
         return unique
 
     # ── Post-Processing ───────────────────────────────────────────────────
@@ -613,18 +665,21 @@ Then output <done/> to signal completion.
         all_action_items: list[dict],
         all_results: list[dict],
     ) -> None:
-        """Run post-processing: external integrations (Slack, Notion, Jira, Calendar).
+        """Run post-processing for external integrations (Slack, Notion, Jira, Linear, HubSpot).
 
-        These are triggered automatically based on what tools the LLM already called.
-        We avoid duplicating work by checking if the tool was already invoked.
+        These are triggered ONLY when explicitly requested by the user in the task title,
+        description, or instructions.
         """
         tool_names_called = {r["tool"] for r in all_results}
         title = input_data.task.get("title", "Draft")
+        description = input_data.task.get("description", "")
         summary = input_data.summary or ""
         attendees = input_data.attendees or []
 
-        # Slack: post if not already called
-        if "slack" not in tool_names_called:
+        user_intent = f"{title} {description} {self.ctx.instructions}".lower()
+
+        # Slack: post only if explicitly requested and not already called
+        if "slack" in user_intent and "slack" not in tool_names_called:
             slack = self.tool_instances.get("slack")
             if slack:
                 try:
@@ -635,12 +690,12 @@ Then output <done/> to signal completion.
                     result = await slack.execute(text=text)
                     if result.success:
                         artifacts.extend(result.artifacts)
-                        self.ctx.log("orchestrator: auto-posted to Slack")
+                        self.ctx.log("orchestrator: posted to Slack per user request")
                 except Exception as e:
-                    self.ctx.log(f"orchestrator: auto-Slack failed — {str(e)[:80]}")
+                    self.ctx.log(f"orchestrator: Slack post failed — {str(e)[:80]}")
 
-        # Notion: save if not already called
-        if "notion" not in tool_names_called:
+        # Notion: save only if explicitly requested and not already called
+        if "notion" in user_intent and "notion" not in tool_names_called:
             notion = self.tool_instances.get("notion")
             if notion:
                 try:
@@ -653,12 +708,12 @@ Then output <done/> to signal completion.
                     )
                     if result.success:
                         artifacts.extend(result.artifacts)
-                        self.ctx.log("orchestrator: auto-saved to Notion")
+                        self.ctx.log("orchestrator: saved to Notion per user request")
                 except Exception as e:
-                    self.ctx.log(f"orchestrator: auto-Notion failed — {str(e)[:80]}")
+                    self.ctx.log(f"orchestrator: Notion save failed — {str(e)[:80]}")
 
-        # Jira: create tickets if action items exist and not already called
-        if "jira" not in tool_names_called and all_action_items:
+        # Jira: create tickets only if explicitly requested and action items exist
+        if "jira" in user_intent and "jira" not in tool_names_called and all_action_items:
             jira = self.tool_instances.get("jira")
             if jira:
                 try:
@@ -668,14 +723,64 @@ Then output <done/> to signal completion.
                     )
                     if result.success:
                         artifacts.extend(result.artifacts)
-                        self.ctx.log("orchestrator: auto-created Jira tickets")
+                        self.ctx.log("orchestrator: created Jira tickets per user request")
                 except Exception as e:
-                    self.ctx.log(f"orchestrator: auto-Jira failed — {str(e)[:80]}")
+                    self.ctx.log(f"orchestrator: Jira ticket creation failed — {str(e)[:80]}")
 
-        # Calendar: create event if not already called and scheduling keywords present
+        # Linear: create issues only if explicitly requested and action items exist
+        if "linear" in user_intent and "linear" not in tool_names_called and all_action_items:
+            linear = self.tool_instances.get("linear")
+            if linear:
+                try:
+                    result = await linear.execute(
+                        action_items=all_action_items,
+                        summary=summary,
+                    )
+                    if result.success:
+                        artifacts.extend(result.artifacts)
+                        self.ctx.log("orchestrator: created Linear issues per user request")
+                except Exception as e:
+                    self.ctx.log(f"orchestrator: Linear issue creation failed — {str(e)[:80]}")
+
+        # HubSpot: log meeting activity and tasks only if explicitly requested
+        if ("hubspot" in user_intent or "crm" in user_intent) and "hubspot" not in tool_names_called:
+            hubspot = self.tool_instances.get("hubspot")
+            if hubspot:
+                try:
+                    result = await hubspot.execute(
+                        title=title,
+                        summary=summary,
+                        attendees=attendees,
+                        action_items=all_action_items,
+                    )
+                    if result.success:
+                        artifacts.extend(result.artifacts)
+                        self.ctx.log("orchestrator: logged to HubSpot CRM per user request")
+                except Exception as e:
+                    self.ctx.log(f"orchestrator: HubSpot logging failed — {str(e)[:80]}")
+
+        # Email Sender: send email only if explicitly requested to send (e.g. "send email")
+        if "send email" in user_intent and "email_sender" not in tool_names_called:
+            email_sender = self.tool_instances.get("email_sender")
+            if email_sender and attendees:
+                recipients = ", ".join([a.get("email") for a in attendees if a.get("email")])
+                if recipients:
+                    try:
+                        result = await email_sender.execute(
+                            to_email=recipients,
+                            subject=f"Follow-up: {title}",
+                            body=summary,
+                        )
+                        if result.success:
+                            artifacts.extend(result.artifacts)
+                            self.ctx.log("orchestrator: sent email per user request")
+                    except Exception as e:
+                        self.ctx.log(f"orchestrator: email send failed — {str(e)[:80]}")
+
+        # Calendar: create event if scheduling keywords present and not already called
         if "calendar_api" not in tool_names_called and "calendar" not in tool_names_called:
-            schedule_keywords = ["schedule", "meeting", "follow-up", "sync", "check-in", "call"]
-            needs_calendar = any(kw in title.lower() for kw in schedule_keywords)
+            schedule_keywords = ["schedule", "calendar", "book meeting", "set up call"]
+            needs_calendar = any(kw in user_intent for kw in schedule_keywords)
             if needs_calendar:
                 cal = self.tool_instances.get("calendar_api") or self.tool_instances.get("calendar")
                 if cal:
@@ -686,6 +791,6 @@ Then output <done/> to signal completion.
                         )
                         if result.success:
                             artifacts.extend(result.artifacts)
-                            self.ctx.log("orchestrator: auto-created calendar event")
+                            self.ctx.log("orchestrator: created calendar event per user request")
                     except Exception as e:
-                        self.ctx.log(f"orchestrator: auto-calendar failed — {str(e)[:80]}")
+                        self.ctx.log(f"orchestrator: calendar event failed — {str(e)[:80]}")

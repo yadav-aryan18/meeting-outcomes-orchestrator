@@ -32,12 +32,17 @@ from .base import BaseTool, ToolResult, ToolSchema
 from .calendar import CalendarTool
 from .calendar_api import CalendarAPITool
 from .email import EmailTool
+from .email_sender import EmailSenderTool
+from .hubspot import HubSpotTool
 from .jira import JiraTool
+from .linear import LinearTool
+from .mcp_client import MCPClientTool
 from .memory import MemoryTool
 from .notion import NotionTool
 from .research import ResearchTool
 from .slack import SlackTool
 from .slides import SlidesTool
+from .vector_memory import VectorMemoryTool
 from .web_scraper import WebScraperTool
 from .web_search import WebSearchTool
 from .wikipedia import WikipediaTool
@@ -50,6 +55,7 @@ TOOL_REGISTRY: dict[str, type[BaseTool]] = {
     "calendar": CalendarTool,
     "calendar_api": CalendarAPITool,
     "email": EmailTool,
+    "email_sender": EmailSenderTool,
     "slides": SlidesTool,
     "action_items": ActionItemsTool,
     "research": ResearchTool,
@@ -57,6 +63,10 @@ TOOL_REGISTRY: dict[str, type[BaseTool]] = {
     "slack": SlackTool,
     "notion": NotionTool,
     "jira": JiraTool,
+    "linear": LinearTool,
+    "hubspot": HubSpotTool,
+    "mcp_client": MCPClientTool,
+    "vector_memory": VectorMemoryTool,
 }
 
 __all__ = [
@@ -70,6 +80,7 @@ __all__ = [
     "CalendarTool",
     "CalendarAPITool",
     "EmailTool",
+    "EmailSenderTool",
     "SlidesTool",
     "ActionItemsTool",
     "ResearchTool",
@@ -77,4 +88,8 @@ __all__ = [
     "SlackTool",
     "NotionTool",
     "JiraTool",
+    "LinearTool",
+    "HubSpotTool",
+    "MCPClientTool",
+    "VectorMemoryTool",
 ]

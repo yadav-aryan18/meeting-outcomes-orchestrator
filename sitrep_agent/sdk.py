@@ -17,6 +17,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+import asyncio
 import httpx
 
 # ── Config (env) ─────────────────────────────────────────────────────
@@ -24,8 +25,23 @@ SITREP_AGENT_SECRET = os.getenv("SITREP_AGENT_SECRET", "")
 SIGNATURE_MAX_AGE_SECONDS = int(os.getenv("SITREP_SIGNATURE_MAX_AGE", "300"))
 # LLM: defaults to local Ollama (free, no signup). BYOK by overriding these.
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:11434/v1")
-LLM_API_KEY = os.getenv("LLM_API_KEY")  # Ollama ignores; required for hosted providers.
+LLM_API_KEY = os.getenv("LLM_API_KEY", "")
 MODEL = os.getenv("MODEL", "llama3.2:1b")
+
+# Google AI Studio (Gemini API) support
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
+GEMINI_PRIMARY_MODEL = os.getenv("GEMINI_PRIMARY_MODEL", "gemini-3.5-flash-lite")
+GEMINI_SECONDARY_MODEL = os.getenv("GEMINI_SECONDARY_MODEL", "gemini-3.1-flash-lite")
+
+# Fallbacks
+FALLBACK_MODELS_STR = os.getenv(
+    "FALLBACK_MODELS",
+    "google/gemma-2-9b-it:free,meta-llama/llama-3.2-3b-instruct:free,mistralai/mistral-7b-instruct:free",
+)
+FALLBACK_MODELS = [m.strip() for m in FALLBACK_MODELS_STR.split(",") if m.strip()]
+FALLBACK_BASE_URL = os.getenv("FALLBACK_BASE_URL", "")
+FALLBACK_API_KEY = os.getenv("FALLBACK_API_KEY", "")
 
 
 def verify_signature(timestamp: str | None, signature: str | None, body: bytes) -> bool:
@@ -52,37 +68,92 @@ def verify_signature(timestamp: str | None, signature: str | None, body: bytes) 
 
 
 class LLM:
-    """Minimal OpenAI-compatible chat client (works with Ollama, OpenAI,
-    OpenRouter, vLLM, LM Studio, …)."""
+    """Minimal OpenAI-compatible chat client supporting Google AI Studio (Gemini),
+    OpenAI, OpenRouter, Ollama, and automatic multi-provider fallback."""
 
     def __init__(self, model: str):
         self.model = model
 
+    def _build_candidates(self) -> list[tuple[str, str, str]]:
+        """Construct an ordered list of (base_url, api_key, model) candidates."""
+        candidates: list[tuple[str, str, str]] = []
+
+        # If GEMINI_API_KEY is present, prioritize Google AI Studio Gemini models
+        if GEMINI_API_KEY:
+            candidates.append((GEMINI_BASE_URL, GEMINI_API_KEY, GEMINI_PRIMARY_MODEL))
+            candidates.append((GEMINI_BASE_URL, GEMINI_API_KEY, GEMINI_SECONDARY_MODEL))
+
+        # Add configured LLM_BASE_URL & MODEL
+        candidates.append((LLM_BASE_URL, LLM_API_KEY, self.model if self.model != "dummy" else GEMINI_PRIMARY_MODEL))
+
+        # Add alternative models on LLM_BASE_URL
+        for alt in FALLBACK_MODELS:
+            candidates.append((LLM_BASE_URL, LLM_API_KEY, alt))
+
+        # Add optional fallback provider or local Ollama
+        if FALLBACK_BASE_URL:
+            candidates.append((FALLBACK_BASE_URL, FALLBACK_API_KEY or LLM_API_KEY, "llama3.2:1b"))
+        elif LLM_BASE_URL != "http://localhost:11434/v1":
+            candidates.append(("http://localhost:11434/v1", "", "llama3.2:1b"))
+
+        # Remove duplicate candidates preserving order
+        unique: list[tuple[str, str, str]] = []
+        seen = set()
+        for c in candidates:
+            key = (c[0].rstrip("/"), c[1], c[2])
+            if key not in seen:
+                seen.add(key)
+                unique.append(c)
+        return unique
+
     async def complete(self, system: str, prompt: str, temperature: float = 0.7) -> str:
-        url = LLM_BASE_URL.rstrip("/") + "/chat/completions"
-        headers = {"Content-Type": "application/json"}
-        if LLM_API_KEY:
-            headers["Authorization"] = f"Bearer {LLM_API_KEY}"
-        async with httpx.AsyncClient(timeout=90.0) as client:
-            resp = await client.post(
-                url,
-                headers=headers,
-                json={
-                    "model": self.model,
-                    "temperature": temperature,
-                    "messages": [
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": prompt},
-                    ],
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            choices = data.get("choices", [])
-            if choices and isinstance(choices, list) and len(choices) > 0:
-                message = choices[0].get("message", {})
-                return message.get("content") or ""
-            return ""
+        candidates = self._build_candidates()
+        # Ensure target self.model is tried first if explicitly specified and not dummy
+        if self.model and self.model != "dummy" and not GEMINI_API_KEY:
+            candidates.insert(0, (LLM_BASE_URL, LLM_API_KEY, self.model))
+
+        last_exception = None
+
+        for base_url, api_key, model_name in candidates:
+            url = base_url.rstrip("/") + "/chat/completions"
+            headers = {"Content-Type": "application/json"}
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+
+            payload = {
+                "model": model_name,
+                "temperature": temperature,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": prompt},
+                ],
+            }
+
+            try:
+                async with httpx.AsyncClient(timeout=45.0) as client:
+                    resp = await client.post(url, headers=headers, json=payload)
+                    resp.raise_for_status()
+                    data = resp.json()
+
+                choices = data.get("choices", [])
+                if choices and isinstance(choices, list) and len(choices) > 0:
+                    message = choices[0].get("message", {})
+                    content = message.get("content") or ""
+                    if content.strip():
+                        return content
+            except httpx.HTTPStatusError as e:
+                last_exception = e
+                # Retry next candidate on rate-limit (429) or server error (5xx)
+                if e.response.status_code in (429, 500, 502, 503, 504):
+                    await asyncio.sleep(0.5)
+                    continue
+            except Exception as e:
+                last_exception = e
+                continue
+
+        if last_exception:
+            raise last_exception
+        return ""
 
 
 @dataclass
