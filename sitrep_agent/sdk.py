@@ -169,6 +169,7 @@ class Ctx:
 
     def log(self, message: str) -> None:
         self.logs.append(message)
+        print(f"[AGENT] {message}", flush=True)
 
 
 @dataclass
