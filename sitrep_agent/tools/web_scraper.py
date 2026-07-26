@@ -21,7 +21,7 @@ from typing import Any
 
 import httpx
 
-from .base import BaseTool, ToolResult
+from .base import BaseTool, ToolResult, ToolSchema
 
 # Request headers that identify us politely
 POLITE_HEADERS = {
@@ -57,7 +57,32 @@ class WebScraperTool(BaseTool):
         "No API key required."
     )
 
-    async def execute(self, url: str, max_chars: int = 8000, **kwargs: Any) -> ToolResult:
+
+    def get_schema(self) -> ToolSchema:
+        return ToolSchema(
+            name="web_scraper",
+            description=(
+                "Fetch and extract the main readable content from a web page URL. "
+                "Useful for reading articles, blog posts, documentation, or any web page "
+                "mentioned in a meeting. Returns the page title and cleaned body text. "
+                "No API key required. Use this after web_search to read a specific page in depth."
+            ),
+            parameters={
+                "url": {
+                    "type": "string",
+                    "description": "The web page URL to scrape. Must start with http:// or https://.",
+                },
+                "max_chars": {
+                    "type": "integer",
+                    "description": "Maximum characters to return (default 8000).",
+                    "default": 8000,
+                },
+            },
+            required=["url"],
+            returns="Dict with 'title', 'content', and 'url' keys.",
+        )
+
+    async def execute(self, url: str = "", max_chars: int = 8000, **kwargs: Any) -> ToolResult:
         """Scrape content from a URL.
 
         Args:

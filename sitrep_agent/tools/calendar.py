@@ -25,7 +25,7 @@ import urllib.parse
 from datetime import datetime, timedelta
 from typing import Any
 
-from .base import BaseTool, ToolResult
+from .base import BaseTool, ToolResult, ToolSchema
 
 GOOGLE_CALENDAR_BASE = "https://calendar.google.com/calendar/render"
 
@@ -41,15 +41,55 @@ class CalendarTool(BaseTool):
         "scheduling a follow-up, setting a deadline, or planning a recurring check-in."
     )
 
+
+    def get_schema(self) -> ToolSchema:
+        return ToolSchema(
+            name="calendar",
+            description=(
+                "Generate a one-click Google Calendar event link (template URL). "
+                "No Google account or API key required. The link opens Google Calendar with pre-filled "
+                "event details that the recipient can save. Use this whenever a meeting task involves "
+                "scheduling a follow-up, setting a deadline, or planning a recurring check-in. "
+                "This is the fallback when calendar_api is not configured."
+            ),
+            parameters={
+                "title": {
+                    "type": "string",
+                    "description": "Event title.",
+                },
+                "details": {
+                    "type": "string",
+                    "description": "Event description/body.",
+                    "default": "",
+                },
+                "duration_minutes": {
+                    "type": "integer",
+                    "description": "Meeting duration in minutes (default 60).",
+                    "default": 60,
+                },
+                "start_time": {
+                    "type": "string",
+                    "description": "ISO-format start time, or omit for tomorrow 9am.",
+                },
+                "attendees": {
+                    "type": "array",
+                    "description": "List of email addresses to pre-populate.",
+                },
+            },
+            required=["title"],
+            returns="Dict with 'url', 'markdown', and 'title' keys.",
+        )
+
     async def execute(
         self,
-        title: str,
+        title: str = "",
         details: str = "",
         duration_minutes: int = 60,
         start_time: str | None = None,
         attendees: list[str] | None = None,
         **kwargs: Any,
     ) -> ToolResult:
+        title = title or kwargs.get("task_title") or "Follow-up"
         """Generate a Google Calendar event link.
 
         Args:

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .base import BaseTool, ToolResult
+from .base import BaseTool, ToolResult, ToolSchema
 
 
 class SlidesTool(BaseTool):
@@ -35,14 +35,44 @@ class SlidesTool(BaseTool):
         "No external tools required."
     )
 
+
+    def get_schema(self) -> ToolSchema:
+        return ToolSchema(
+            name="slides",
+            description=(
+                "Create a structured slide deck outline and HTML preview from meeting content. "
+                "Ideal for tasks like 'prepare a presentation', 'deck for the board', or 'slide outline'. "
+                "Produces both a markdown outline (editable) and an HTML preview (visual). "
+                "No external tools required. Use this when the task involves creating a presentation."
+            ),
+            parameters={
+                "task_title": {
+                    "type": "string",
+                    "description": "The presentation topic.",
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "Meeting summary to base slides on.",
+                },
+                "slide_count": {
+                    "type": "integer",
+                    "description": "Target number of slides (default 8, range 4-15).",
+                    "default": 8,
+                },
+            },
+            required=["task_title", "summary"],
+            returns="Dict with 'outline', 'html', and 'slide_count' keys.",
+        )
+
     async def execute(
         self,
-        task_title: str,
+        task_title: str = "",
         summary: str = "",
         slide_count: int = 8,
         llm: Any = None,
         **kwargs: Any,
     ) -> ToolResult:
+        task_title = task_title or kwargs.get("title") or "Presentation"
         """Generate slide outline and HTML preview.
 
         Args:

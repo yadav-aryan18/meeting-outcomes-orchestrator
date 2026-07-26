@@ -22,7 +22,7 @@ from typing import Any
 
 import httpx
 
-from .base import BaseTool, ToolResult
+from .base import BaseTool, ToolResult, ToolSchema
 
 # DuckDuckGo lite search endpoint — minimal, fast, no JS required
 DDG_LITE_URL = "https://lite.duckduckgo.com/lite/"
@@ -48,7 +48,34 @@ class WebSearchTool(BaseTool):
         "No API key required."
     )
 
-    async def execute(self, query: str, num_results: int = 5, **kwargs: Any) -> ToolResult:
+
+    def get_schema(self) -> ToolSchema:
+        return ToolSchema(
+            name="web_search",
+            description=(
+                "Search the web for current information, news, market data, "
+                "competitor intelligence, or any topic mentioned in a meeting. "
+                "Returns top results with titles, URLs, and snippets. "
+                "No API key required. Use this when the meeting mentions a company, "
+                "technology, market trend, or any topic that needs external verification."
+            ),
+            parameters={
+                "query": {
+                    "type": "string",
+                    "description": "The search query. Be specific and include relevant keywords.",
+                },
+                "num_results": {
+                    "type": "integer",
+                    "description": "Number of results to return (1-10, default 5).",
+                    "default": 5,
+                },
+            },
+            required=["query"],
+            returns="List of search results with title, URL, and snippet for each.",
+        )
+
+    async def execute(self, query: str = "", num_results: int = 5, **kwargs: Any) -> ToolResult:
+        query = query or kwargs.get("topic") or ""
         """Execute a web search.
 
         Args:

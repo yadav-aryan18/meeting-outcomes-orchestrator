@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .base import BaseTool, ToolResult
+from .base import BaseTool, ToolResult, ToolSchema
 
 
 class EmailTool(BaseTool):
@@ -40,9 +40,53 @@ class EmailTool(BaseTool):
         "decisions to the team."
     )
 
+
+    def get_schema(self) -> ToolSchema:
+        return ToolSchema(
+            name="email",
+            description=(
+                "Draft a professional, personalized follow-up email based on meeting context. "
+                "Uses attendee names for personalization, includes clear next steps, and never "
+                "invents facts not present in the meeting summary. Use this for any task that "
+                "involves sending an email, following up with stakeholders, or communicating "
+                "decisions to the team."
+            ),
+            parameters={
+                "task_title": {
+                    "type": "string",
+                    "description": "The action item title.",
+                },
+                "task_description": {
+                    "type": "string",
+                    "description": "Additional task details.",
+                    "default": "",
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "Meeting summary text.",
+                },
+                "attendees": {
+                    "type": "array",
+                    "description": "List of attendee dicts with 'name' key.",
+                },
+                "research_context": {
+                    "type": "string",
+                    "description": "Optional research to weave into the email.",
+                    "default": "",
+                },
+                "tone": {
+                    "type": "string",
+                    "description": "Email tone: professional, friendly, formal, or urgent (default professional).",
+                    "default": "professional",
+                },
+            },
+            required=["task_title", "summary", "attendees"],
+            returns="Dict with 'subject', 'body', 'recipients', and 'greeting' keys.",
+        )
+
     async def execute(
         self,
-        task_title: str,
+        task_title: str = "",
         task_description: str = "",
         summary: str = "",
         attendees: list[dict[str, Any]] | None = None,
@@ -51,6 +95,7 @@ class EmailTool(BaseTool):
         llm: Any = None,
         **kwargs: Any,
     ) -> ToolResult:
+        task_title = task_title or kwargs.get("title") or "Follow-up"
         """Draft a follow-up email.
 
         Args:

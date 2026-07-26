@@ -77,7 +77,12 @@ class LLM:
                 },
             )
             resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"]
+            data = resp.json()
+            choices = data.get("choices", [])
+            if choices and isinstance(choices, list) and len(choices) > 0:
+                message = choices[0].get("message", {})
+                return message.get("content") or ""
+            return ""
 
 
 @dataclass

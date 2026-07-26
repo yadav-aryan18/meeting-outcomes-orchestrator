@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .base import BaseTool, ToolResult
+from .base import BaseTool, ToolResult, ToolSchema
 
 
 class ActionItemsTool(BaseTool):
@@ -38,14 +38,44 @@ class ActionItemsTool(BaseTool):
         "meeting where decisions and next steps were discussed."
     )
 
+
+    def get_schema(self) -> ToolSchema:
+        return ToolSchema(
+            name="action_items",
+            description=(
+                "Extract structured action items from a meeting summary, including owners, "
+                "deadlines, and priorities. This is the highest-impact post-meeting automation. "
+                "Use this for sprint planning, project kickoffs, quarterly reviews, or any "
+                "meeting where decisions and next steps were discussed. "
+                "Always use this when the task involves extracting tasks, decisions, or next steps."
+            ),
+            parameters={
+                "task_title": {
+                    "type": "string",
+                    "description": "The meeting task title.",
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "Meeting summary text.",
+                },
+                "attendees": {
+                    "type": "array",
+                    "description": "List of attendee dicts with 'name' key.",
+                },
+            },
+            required=["task_title", "summary", "attendees"],
+            returns="Dict with 'raw_markdown', 'items' (list), and 'count' keys.",
+        )
+
     async def execute(
         self,
-        task_title: str,
+        task_title: str = "",
         summary: str = "",
         attendees: list[dict[str, Any]] | None = None,
         llm: Any = None,
         **kwargs: Any,
     ) -> ToolResult:
+        task_title = task_title or kwargs.get("title") or "Draft"
         """Extract structured action items.
 
         Args:

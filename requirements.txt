@@ -1,3 +1,7 @@
 fastapi>=0.109.0
 uvicorn[standard]>=0.27.0
 httpx>=0.26.0
+
+# Optional: for Google Calendar API JWT signing (production)
+# google-auth>=2.0.0
+# google-auth-oauthlib>=1.0.0

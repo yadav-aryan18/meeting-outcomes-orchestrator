@@ -21,7 +21,7 @@ from typing import Any
 
 import httpx
 
-from .base import BaseTool, ToolResult
+from .base import BaseTool, ToolResult, ToolSchema
 
 WIKI_SUMMARY_API = "https://en.wikipedia.org/api/rest_v1/page/summary/"
 WIKI_PAGE_URL = "https://en.wikipedia.org/wiki/"
@@ -47,7 +47,28 @@ class WikipediaTool(BaseTool):
         "No API key required."
     )
 
-    async def execute(self, topic: str, **kwargs: Any) -> ToolResult:
+
+    def get_schema(self) -> ToolSchema:
+        return ToolSchema(
+            name="wikipedia",
+            description=(
+                "Look up a topic on Wikipedia and return a concise, factual summary. "
+                "Ideal for grounding meeting discussions in verified background knowledge. "
+                "Useful for researching technologies, companies, concepts, or people mentioned in meetings. "
+                "No API key required. Use this when you need reliable, encyclopedic background on a topic."
+            ),
+            parameters={
+                "topic": {
+                    "type": "string",
+                    "description": "The topic to look up (e.g., 'machine learning', 'Salesforce').",
+                },
+            },
+            required=["topic"],
+            returns="Dict with 'title', 'extract', and 'url' keys.",
+        )
+
+    async def execute(self, topic: str = "", **kwargs: Any) -> ToolResult:
+        topic = topic or kwargs.get("query") or ""
         """Fetch Wikipedia summary for a topic.
 
         Args:

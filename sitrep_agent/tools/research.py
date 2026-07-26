@@ -25,7 +25,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from .base import BaseTool, ToolResult
+from .base import BaseTool, ToolResult, ToolSchema
 from .web_search import WebSearchTool
 from .wikipedia import WikipediaTool
 from .web_scraper import WebScraperTool
@@ -42,15 +42,52 @@ class ResearchTool(BaseTool):
         "competitive analysis, market sizing, technology evaluation, or fact-checking."
     )
 
+
+    def get_schema(self) -> ToolSchema:
+        return ToolSchema(
+            name="research",
+            description=(
+                "Conduct multi-source research on any topic and synthesize a structured brief. "
+                "Combines web search, Wikipedia, and web scraping to provide comprehensive, "
+                "cited background information. Use this when a meeting task involves research, "
+                "competitive analysis, market sizing, technology evaluation, or fact-checking. "
+                "This is the most powerful tool for gathering external context."
+            ),
+            parameters={
+                "query": {
+                    "type": "string",
+                    "description": "The research query/topic.",
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "Meeting summary for context.",
+                    "default": "",
+                },
+                "scrape_urls": {
+                    "type": "boolean",
+                    "description": "Whether to scrape top search result pages for deeper context.",
+                    "default": True,
+                },
+                "max_scrape": {
+                    "type": "integer",
+                    "description": "Max URLs to scrape (default 2, to stay fast).",
+                    "default": 2,
+                },
+            },
+            required=["query"],
+            returns="Dict with 'brief', 'sources_used', and 'query' keys.",
+        )
+
     async def execute(
         self,
-        query: str,
+        query: str = "",
         summary: str = "",
         llm: Any = None,
         scrape_urls: bool = False,
         max_scrape: int = 2,
         **kwargs: Any,
     ) -> ToolResult:
+        query = query or kwargs.get("topic") or kwargs.get("task_title") or "general research"
         """Execute multi-source research.
 
         Args:

@@ -1,11 +1,11 @@
 {
   "name": "Meeting Outcomes Orchestrator",
-  "tagline": "Turn every meeting into structured action items, research, emails, and calendar events — automatically.",
-  "description": "An intelligent post-meeting agent that analyzes your task and automatically produces the right outputs. It extracts structured action items with owners and deadlines, drafts personalized follow-up emails using attendee names, conducts multi-source research with web search and Wikipedia, generates slide outlines with HTML previews, creates one-click Google Calendar links, and produces project plans or technical documentation. Unlike simple prompt-based agents, it uses an intelligent router to determine what you actually need and orchestrates specialized tools in parallel. No API keys required for core features.",
+  "tagline": "An intelligent agent that dynamically reasons about your meeting and orchestrates the right tools — research, emails, action items, slides, calendar, Slack, Notion, and Jira — automatically.",
+  "description": "A SOTA ReAct-powered post-meeting agent that uses dynamic tool discovery and LLM-driven reasoning to transform meetings into actionable work. Unlike hardcoded agents, it reasons about what the user actually needs, selects tools dynamically from a modular registry, executes them in parallel, and synthesizes polished outputs. Features: web search, Wikipedia, web scraping, personalized email drafting, slide deck generation, structured action item extraction, multi-source research, Google Calendar integration, SQLite memory across meetings, Slack notifications, Notion page creation, and Jira ticket creation. All integrations are optional — the agent works with zero configuration.",
   "icon": "🎯",
   "color": "indigo",
   "category": "productivity",
-  "taskTypes": ["doc", "summary", "email", "research", "plan"],
+  "taskTypes": ["doc", "summary", "email", "research", "plan", "ticket", "notification"],
   "requiredIntegrations": [],
   "pricing": { "model": "free", "label": "Free" }
 }
