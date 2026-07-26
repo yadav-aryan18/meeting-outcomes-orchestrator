@@ -19,6 +19,10 @@ from typing import Any
 
 import asyncio
 import httpx
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # ── Config (env) ─────────────────────────────────────────────────────
 SITREP_AGENT_SECRET = os.getenv("SITREP_AGENT_SECRET", "")

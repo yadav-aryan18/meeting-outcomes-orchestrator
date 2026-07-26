@@ -33,6 +33,9 @@ import httpx
 from .base import BaseTool, ToolResult, ToolSchema
 
 MCP_SERVER_URLS = os.getenv("MCP_SERVER_URLS", "")
+MCP_API_TOKEN = os.getenv("MCP_API_TOKEN", "")
+MCP_API_TOKENS = os.getenv("MCP_API_TOKENS", "")
+MCP_SERVER_AUTH = os.getenv("MCP_SERVER_AUTH", "")
 
 
 class MCPClientTool(BaseTool):
@@ -51,6 +54,90 @@ class MCPClientTool(BaseTool):
         self.server_urls = [
             u.strip() for u in MCP_SERVER_URLS.split(",") if u.strip() and u.strip().startswith("http")
         ]
+        self.default_token = MCP_API_TOKEN
+        self.tokens_list = [t.strip() for t in MCP_API_TOKENS.split(",") if t.strip()]
+        self.server_auth_map: dict[str, str] = {}
+        if MCP_SERVER_AUTH:
+            try:
+                parsed = json.loads(MCP_SERVER_AUTH)
+                if isinstance(parsed, dict):
+                    self.server_auth_map = {str(k).strip(): str(v).strip() for k, v in parsed.items()}
+            except Exception as e:
+                self.log(f"mcp_client: error parsing MCP_SERVER_AUTH JSON map — {e}")
+
+        self.tool_to_server_map: dict[str, str] = {}
+
+    def _resolve_token_for_url(self, target_url: str) -> str:
+        """Resolve authorization token using 3-tiered multi-server auth strategy:
+        Tier 1: Explicit URL match in MCP_SERVER_AUTH JSON map
+        Tier 2: Positional match in MCP_API_TOKENS list
+        Tier 3: Default fallback token in MCP_API_TOKEN
+        """
+        target_clean = target_url.strip()
+        # Tier 1: JSON Map lookup
+        if target_clean in self.server_auth_map:
+            return self.server_auth_map[target_clean]
+
+        # Tier 2: Positional index matching
+        if target_clean in self.server_urls:
+            idx = self.server_urls.index(target_clean)
+            if idx < len(self.tokens_list):
+                return self.tokens_list[idx]
+
+        # Tier 3: Fallback token
+        return self.default_token
+
+    def _get_headers_for_server(self, target_url: str) -> dict[str, str]:
+        """Construct HTTP headers for a specific target MCP server URL."""
+        headers = {"Content-Type": "application/json"}
+        token = self._resolve_token_for_url(target_url)
+        if token:
+            if token.startswith("Bearer "):
+                headers["Authorization"] = token
+            else:
+                headers["Authorization"] = f"Bearer {token}"
+        return headers
+
+    def _get_headers(self, target_url: str = "") -> dict[str, str]:
+        return self._get_headers_for_server(target_url)
+
+    def fetch_remote_schemas(self) -> list[ToolSchema]:
+        """Synchronously query `tools/list` on configured MCP servers to expose remote tools as ToolSchema objects."""
+        if not self.server_urls:
+            return []
+
+        remote_schemas: list[ToolSchema] = []
+        payload = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
+        for target in self.server_urls:
+            try:
+                headers = self._get_headers_for_server(target)
+                with httpx.Client(timeout=10.0) as client:
+                    resp = client.post(target, headers=headers, json=payload)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        tools = data.get("result", {}).get("tools", [])
+                        for t in tools:
+                            t_name = t.get("name")
+                            t_desc = t.get("description", "")
+                            input_schema = t.get("inputSchema", {})
+                            props = input_schema.get("properties", {})
+                            req = input_schema.get("required", [])
+                            if t_name:
+                                self.tool_to_server_map[t_name] = target
+                                remote_schemas.append(
+                                    ToolSchema(
+                                        name=t_name,
+                                        description=f"[Remote MCP Tool on {target}] {t_desc}",
+                                        parameters={
+                                            "type": "object",
+                                            "properties": props,
+                                            "required": req,
+                                        },
+                                    )
+                                )
+            except Exception as e:
+                self.log(f"mcp_client: failed to fetch remote schemas from {target} — {e}")
+        return remote_schemas
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -143,7 +230,7 @@ class MCPClientTool(BaseTool):
             }
             try:
                 async with httpx.AsyncClient(timeout=15.0) as client:
-                    resp = await client.post(target, json=payload)
+                    resp = await client.post(target, headers=self._get_headers_for_server(target), json=payload)
                     resp.raise_for_status()
                     data = resp.json()
 
@@ -187,6 +274,10 @@ class MCPClientTool(BaseTool):
     ) -> ToolResult:
         """Execute `tools/call` on target MCP servers."""
         last_error = ""
+        mapped_target = self.tool_to_server_map.get(tool_name)
+        if mapped_target and mapped_target in targets:
+            targets = [mapped_target] + [t for t in targets if t != mapped_target]
+
         for target in targets:
             self.log(f"mcp_client: calling tool '{tool_name}' on {target}")
             payload = {
@@ -200,7 +291,7 @@ class MCPClientTool(BaseTool):
             }
             try:
                 async with httpx.AsyncClient(timeout=30.0) as client:
-                    resp = await client.post(target, json=payload)
+                    resp = await client.post(target, headers=self._get_headers_for_server(target), json=payload)
                     resp.raise_for_status()
                     res_json = resp.json()
 

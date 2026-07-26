@@ -83,7 +83,7 @@ class DynamicOrchestrator:
         """
         self.ctx = ctx
         self.llm = ctx.llm
-        self.max_iterations = 3
+        self.max_iterations = 10
         self.tool_instances: dict[str, BaseTool] = {}
         self.tool_schemas: list[ToolSchema] = []
         self._discover_tools()
@@ -101,6 +101,13 @@ class DynamicOrchestrator:
                 self.tool_instances[name] = instance
                 schema = instance.get_schema()
                 self.tool_schemas.append(schema)
+
+                # Dynamically register all remote MCP server tool schemas into LLM prompt
+                if name == "mcp_client" and hasattr(instance, "fetch_remote_schemas"):
+                    remote_schemas = instance.fetch_remote_schemas()
+                    for r_schema in remote_schemas:
+                        self.tool_schemas.append(r_schema)
+                        self.ctx.log(f"orchestrator: discovered remote MCP tool '{r_schema.name}'")
             except Exception as e:
                 self.ctx.log(f"orchestrator: failed to discover tool '{name}': {e}")
 
@@ -124,6 +131,7 @@ class DynamicOrchestrator:
 
         self.ctx.log(f"orchestrator: starting dynamic orchestration for '{title}'")
         self.ctx.log(f"orchestrator: discovered {len(self.tool_schemas)} tools")
+        self._verified_completion = False
 
         # Step 0: Retrieve historical context from memory & vector RAG
         memory = MemoryTool(ctx=self.ctx)
@@ -181,6 +189,19 @@ class DynamicOrchestrator:
 
             # Check for done signal
             if self._is_done(response):
+                # Pure Generic Task Verification: When <done/> is emitted on an early iteration, prompt LLM to self-verify task requirements
+                if not getattr(self, "_verified_completion", False) and iteration < self.max_iterations:
+                    self._verified_completion = True
+                    self.ctx.log("orchestrator: LLM emitted <done> — sending generic task verification feedback for self-correction")
+                    verification_prompt = (
+                        "System Verification Warning: You emitted <done/>. Please check your tool execution history in this conversation. "
+                        "Did you issue a <tool_call> to execute every requested action (such as sending an email, creating a ticket, or posting a message)? "
+                        "Writing text artifacts in your response does NOT execute remote tool actions. "
+                        "If an action tool call has NOT been executed yet, output the <tool_call> tag now to execute it. Only emit <done/> if all tool actions have been executed."
+                    )
+                    conversation = f"{conversation}\n\n{response}\n\n{verification_prompt}"
+                    continue
+
                 self.ctx.log("orchestrator: received <done> signal")
                 break
 
@@ -202,15 +223,9 @@ class DynamicOrchestrator:
                     items = result.get("data", {}).get("items", [])
                     all_action_items.extend(items)
 
-            # Build observation prompt for next iteration
-            observation = self._build_observation(results)
-            conversation = (
-                f"{conversation}\n\n"
-                f"{response}\n\n"
-                f"{observation}\n\n"
-                f"Based on these observations, decide if you need more tool calls or if you are ready to synthesize the final output. "
-                f"If you need more tools, output <tool_call> tags. If you are done, output <artifacts> and <done/>."
-            )
+            # Build observation prompt with dynamic task audit checklist for next iteration
+            observation = self._build_observation(results, input_data=input_data, all_tool_results=all_tool_results)
+            conversation = f"{conversation}\n\n{response}\n\n{observation}"
 
         # Step 4: Final synthesis — ask LLM to produce artifacts
         self.ctx.log("orchestrator: requesting final synthesis")
@@ -353,11 +368,18 @@ Then output <done/> to signal completion.
             f"**Description:** {schema.description}",
             "**Parameters:**",
         ]
-        for param_name, param_info in schema.parameters.items():
-            req = " (required)" if param_name in schema.required else ""
-            default = f" [default: {param_info.get('default', 'none')}]" if "default" in param_info else ""
-            desc = param_info.get("description", "")
-            lines.append(f"  - `{param_name}`{req}{default}: {desc}")
+        props = schema.parameters.get("properties", {}) if isinstance(schema.parameters, dict) and "properties" in schema.parameters else schema.parameters
+        required = schema.required or (schema.parameters.get("required", []) if isinstance(schema.parameters, dict) else [])
+
+        if isinstance(props, dict):
+            for param_name, param_info in props.items():
+                if isinstance(param_info, dict):
+                    req = " (required)" if param_name in required else ""
+                    default = f" [default: {param_info.get('default', 'none')}]" if "default" in param_info else ""
+                    desc = param_info.get("description", "")
+                    lines.append(f"  - `{param_name}`{req}{default}: {desc}")
+                else:
+                    lines.append(f"  - `{param_name}`: {param_info}")
         lines.append(f"**Returns:** {schema.returns}")
         return "\n".join(lines)
 
@@ -418,7 +440,10 @@ Then output <done/> to signal completion.
         """
         calls = []
         pattern = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL | re.IGNORECASE)
-        for match in pattern.finditer(text):
+        matches = list(pattern.finditer(text))
+
+        # 1. First search for explicit <tool_call> tags
+        for match in matches:
             raw = match.group(1).strip()
             try:
                 parsed = json.loads(raw)
@@ -426,7 +451,6 @@ Then output <done/> to signal completion.
                 if normalized:
                     calls.append(normalized)
             except json.JSONDecodeError:
-                # Try to fix common LLM JSON errors
                 try:
                     fixed = self._fix_json(raw)
                     parsed = json.loads(fixed)
@@ -435,17 +459,58 @@ Then output <done/> to signal completion.
                         calls.append(normalized)
                 except Exception:
                     self.ctx.log(f"orchestrator: failed to parse tool call JSON: {raw[:100]}")
+
+        # 2. Fallback: If no calls found in tags, look for JSON objects containing tool/name keys
+        if not calls:
+            raw_blocks = re.findall(r"(\{(?:[^{}]|(?:\{[^{}]*\}))*\})", text, re.DOTALL)
+            for block in raw_blocks:
+                try:
+                    parsed = json.loads(block)
+                    normalized = self._normalize_parsed_tool_call(parsed)
+                    if normalized:
+                        calls.append(normalized)
+                except Exception:
+                    continue
+
         return calls
 
     def _normalize_parsed_tool_call(self, parsed: Any) -> dict | None:
-        if not isinstance(parsed, dict) or "tool" not in parsed:
+        if not isinstance(parsed, dict):
             return None
-        tool_name = str(parsed["tool"])
-        if "args" in parsed and isinstance(parsed["args"], dict):
-            return {"tool": tool_name, "args": parsed["args"]}
-        # Top-level args
-        args = {k: v for k, v in parsed.items() if k != "tool"}
-        return {"tool": tool_name, "args": args}
+
+        # Standard SitRep format: {"tool": "name", "args": {...}}
+        if "tool" in parsed:
+            tool_name = str(parsed["tool"])
+            if "args" in parsed and isinstance(parsed["args"], dict):
+                return {"tool": tool_name, "args": parsed["args"]}
+            args = {k: v for k, v in parsed.items() if k != "tool"}
+            return {"tool": tool_name, "args": args}
+
+        # OpenAI / Gemini Function Calling format: {"name": "...", "parameters": {...}} or {"type": "function", ...}
+        if "name" in parsed or ("function" in parsed and isinstance(parsed["function"], dict)):
+            tool_name = str(parsed.get("name") or parsed.get("function", {}).get("name", ""))
+            if not tool_name:
+                return None
+
+            raw_args = (
+                parsed.get("parameters")
+                or parsed.get("arguments")
+                or parsed.get("args")
+                or parsed.get("function", {}).get("arguments")
+                or {}
+            )
+            if isinstance(raw_args, str):
+                try:
+                    raw_args = json.loads(raw_args)
+                except Exception:
+                    raw_args = {}
+
+            if not isinstance(raw_args, dict):
+                raw_args = {}
+
+            return {"tool": tool_name, "args": raw_args}
+
+        return None
 
     def _fix_json(self, raw: str) -> str:
         """Attempt to fix common LLM JSON formatting errors."""
@@ -461,25 +526,45 @@ Then output <done/> to signal completion.
         return bool(re.search(r"<done\s*/?>", text, re.IGNORECASE))
 
     def _extract_artifacts(self, text: str) -> list[dict]:
-        """Extract and parse the <artifacts> JSON array."""
+        """Extract and parse the <artifacts> JSON array with robust fallback."""
         match = re.search(r"<artifacts>(.*?)</artifacts>", text, re.DOTALL | re.IGNORECASE)
         if not match:
             return []
         raw = match.group(1).strip()
+
+        # Clean markdown fences if present
+        raw = re.sub(r"^```json\s*", "", raw, flags=re.IGNORECASE)
+        raw = re.sub(r"```\s*$", "", raw)
+
+        # 1. Primary: Try standard JSON decode
         try:
-            # Remove markdown code fences if present
-            raw = re.sub(r"^```json\s*", "", raw)
-            raw = re.sub(r"```\s*$", "", raw)
             artifacts = json.loads(raw)
             if isinstance(artifacts, list):
-                # Validate each artifact
                 valid = []
                 for art in artifacts:
                     if isinstance(art, dict) and "type" in art and "title" in art and "content" in art:
                         valid.append(art)
-                return valid
-        except json.JSONDecodeError:
-            self.ctx.log(f"orchestrator: failed to parse artifacts JSON: {raw[:200]}")
+                if valid:
+                    return valid
+        except Exception:
+            pass
+
+        # 2. Fallback: Extract JSON array bracket [...] if conversational text was intermingled
+        array_match = re.search(r"(\[\s*\{.*\}\s*\])", raw, re.DOTALL)
+        if array_match:
+            try:
+                artifacts = json.loads(array_match.group(1))
+                if isinstance(artifacts, list):
+                    valid = []
+                    for art in artifacts:
+                        if isinstance(art, dict) and "type" in art and "title" in art and "content" in art:
+                            valid.append(art)
+                    if valid:
+                        return valid
+            except Exception:
+                pass
+
+        self.ctx.log(f"orchestrator: failed to parse artifacts JSON: {raw[:200]}")
         return []
 
     # ── Tool Execution ──────────────────────────────────────────────────
@@ -531,6 +616,16 @@ Then output <done/> to signal completion.
     ) -> ToolResult:
         """Execute a single tool call."""
         if tool_name not in self.tool_instances:
+            # Route any dynamically discovered MCP tool directly to mcp_client
+            mcp_client = self.tool_instances.get("mcp_client")
+            if mcp_client:
+                self.ctx.log(f"orchestrator: routing remote MCP tool '{tool_name}' to mcp_client")
+                return await mcp_client.execute(
+                    operation="call_tool",
+                    tool_name=tool_name,
+                    arguments=args,
+                )
+
             return ToolResult(
                 success=False,
                 data={},
@@ -576,24 +671,53 @@ Then output <done/> to signal completion.
                 error=str(e),
             )
 
-    def _build_observation(self, results: list[dict]) -> str:
-        """Build the observation prompt from tool execution results.
+    def _build_observation(
+        self,
+        results: list[dict],
+        input_data: AgentInput | None = None,
+        all_tool_results: list[dict] | None = None,
+    ) -> str:
+        """Build the observation prompt from tool execution results, system logs, and task checklist.
 
-        This is fed back to the LLM so it can see what happened.
+        This is fed back to the LLM so it can see exact execution logs and cross-reference
+        all task requirements against executed tools on every iteration step.
         """
-        lines = ["## Tool Execution Results"]
+        lines = ["## Tool Execution Results & System Logs"]
         for result in results:
             tool_name = result["tool"]
             success = result["success"]
             summary = result.get("summary", "")
             error = result.get("error", "")
+            data = result.get("data", {})
 
             status = "✅ SUCCESS" if success else "❌ FAILED"
-            lines.append(f"\n### {tool_name} — {status}")
+            lines.append(f"\n### Tool: `{tool_name}` — Status: {status}")
             if summary:
                 lines.append(f"Summary: {summary}")
             if error:
-                lines.append(f"Error: {error}")
+                lines.append(f"Execution Error / Log: {error}")
+            if data:
+                data_str = json.dumps(data, indent=2) if isinstance(data, (dict, list)) else str(data)
+                lines.append(f"Returned Data / Output Log:\n```json\n{data_str[:1500]}\n```")
+
+        # Dynamic Execution Checklist for Self-Audit
+        if input_data and input_data.task:
+            task_title = input_data.task.get("title", "")
+            task_desc = input_data.task.get("description", "")
+            executed_tools = list({r["tool"] for r in (all_tool_results or results) if r.get("success")})
+
+            lines.extend([
+                "",
+                "## Dynamic Task Audit Checklist",
+                f"- **Original Task**: \"{task_title}\" — {task_desc}",
+                f"- **Tools Executed So Far**: {executed_tools if executed_tools else 'None'}",
+                "",
+                "**Self-Audit Instruction**:",
+                "Cross-reference the Original Task requirements against the Tools Executed So Far:",
+                "1. Are there any deliverables or actions requested in the task that have NOT been executed via a tool call yet?",
+                "2. If YES: Output the next required <tool_call> tag now.",
+                "3. If NO (all requested task actions are 100% executed via tool calls): Output <done/>.",
+            ])
 
         return "\n".join(lines)
 
@@ -628,14 +752,17 @@ Then output <done/> to signal completion.
             return unique
 
         # Guaranteed Fallback: Execute local tools on input_data
-        if input_data and input_data.summary:
-            title = input_data.task.get("title", "Meeting Outcome")
+        title = input_data.task.get("title", "Meeting Outcome") if (input_data and input_data.task) else "Meeting Outcome"
+        description = input_data.task.get("description", "") if (input_data and input_data.task) else ""
+        summary = input_data.summary or ""
+
+        if summary:
             self.ctx.log("orchestrator: running local fallback tools for guaranteed artifacts")
 
             ai_tool = self.tool_instances.get("action_items")
             if ai_tool:
                 try:
-                    res = await ai_tool.execute(summary=input_data.summary, task_title=title)
+                    res = await ai_tool.execute(summary=summary, task_title=title)
                     if res.artifacts:
                         unique.extend(res.artifacts)
                 except Exception as e:
@@ -645,7 +772,7 @@ Then output <done/> to signal completion.
             if email_tool:
                 try:
                     res = await email_tool.execute(
-                        summary=input_data.summary,
+                        summary=summary,
                         task_title=title,
                         attendees=input_data.attendees,
                     )
@@ -653,6 +780,14 @@ Then output <done/> to signal completion.
                         unique.extend(res.artifacts)
                 except Exception as e:
                     self.ctx.log(f"orchestrator: fallback email error — {e}")
+
+        # Absolute Fallback Guarantee: Always return at least 1 rich Markdown artifact
+        if not unique:
+            unique.append({
+                "type": "markdown",
+                "title": f"Outcome Summary: {title}",
+                "content": f"# {title}\n\n**Task Description:**\n{description}\n\n**Meeting Summary:**\n{summary if summary else 'No meeting summary provided.'}"
+            })
 
         return unique
 
@@ -759,23 +894,30 @@ Then output <done/> to signal completion.
                 except Exception as e:
                     self.ctx.log(f"orchestrator: HubSpot logging failed — {str(e)[:80]}")
 
-        # Email Sender: send email only if explicitly requested to send (e.g. "send email")
-        if "send email" in user_intent and "email_sender" not in tool_names_called:
+        # Email Sender / Remote Gmail MCP: send email if explicitly requested and no email tool executed yet
+        email_keywords = ["send email", "send an email", "email to"]
+        needs_email = any(kw in user_intent for kw in email_keywords)
+        email_executed = any(("email" in t or "gmail" in t) for t in tool_names_called)
+
+        if needs_email and not email_executed:
+            recipients = ", ".join([a.get("email") for a in attendees if (isinstance(a, dict) and a.get("email"))]) if attendees else ""
+            email_body = summary
+            if artifacts and isinstance(artifacts[0], dict) and artifacts[0].get("content"):
+                email_body = artifacts[0]["content"]
+
             email_sender = self.tool_instances.get("email_sender")
-            if email_sender and attendees:
-                recipients = ", ".join([a.get("email") for a in attendees if a.get("email")])
-                if recipients:
-                    try:
-                        result = await email_sender.execute(
-                            to_email=recipients,
-                            subject=f"Follow-up: {title}",
-                            body=summary,
-                        )
-                        if result.success:
-                            artifacts.extend(result.artifacts)
-                            self.ctx.log("orchestrator: sent email per user request")
-                    except Exception as e:
-                        self.ctx.log(f"orchestrator: email send failed — {str(e)[:80]}")
+            if email_sender and recipients:
+                try:
+                    result = await email_sender.execute(
+                        to_email=recipients,
+                        subject=f"Follow-up: {title}",
+                        body=email_body,
+                    )
+                    if result.success:
+                        artifacts.extend(result.artifacts)
+                        self.ctx.log("orchestrator: sent email via local email_sender per user request")
+                except Exception as e:
+                    self.ctx.log(f"orchestrator: local email send failed — {str(e)[:80]}")
 
         # Calendar: create event if scheduling keywords present and not already called
         if "calendar_api" not in tool_names_called and "calendar" not in tool_names_called:
