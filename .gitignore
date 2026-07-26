@@ -22,3 +22,6 @@ logs/
 *.log
 *.tmp
 
+# Database
+agent_memory.db
+vector_memory_store.json
