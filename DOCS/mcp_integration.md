@@ -2,6 +2,10 @@
 
 SitRep v3.0 connects to remote Model Context Protocol (MCP) servers to execute cloud operations (Gmail, Google Drive, Google Calendar, Semantic Scholar, Cloudflare, etc.).
 
+> [!IMPORTANT]
+> **REMOTE MCP TOOLS CONFIGURATION REQUIREMENT:**  
+> **Remote MCP tools MUST be added by the user. You can host/set up your remote MCP server endpoints using [Smithery.ai](https://smithery.ai) or any other MCP client/provider, and add them into your `.env` file via `MCP_SERVER_URLS` and `MCP_API_TOKEN`.**
+
 ---
 
 ## 🌐 How Remote MCP Discovery Works

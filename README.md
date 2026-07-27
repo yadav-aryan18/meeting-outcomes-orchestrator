@@ -1,123 +1,168 @@
-# Meeting Outcomes Orchestrator
+# SitRep Meeting Outcomes Orchestrator v3.0
 
-An intelligent post-meeting AI agent for the [SitRep](https://joinsitrep.com) Agent Marketplace. Unlike simple prompt-based agents, this agent uses an **intelligent router** to analyze meeting tasks and orchestrate specialized tools in parallel — producing structured action items, research briefs, emails, slide decks, calendar events, Slack posts, Notion pages, and Jira tickets.
+An advanced, production-grade AI Agent designed for the [SitRep](https://joinsitrep.com) Agent Marketplace, built around the [AgentStarterKit](https://github.com/SitRepAI/AgentStarterKit).
 
-## What It Does
+SitRep v3.0 operates as a **SOTA ReAct Dynamic Orchestrator**. It auto-discovers local tools and remote Model Context Protocol (MCP) servers (such as Smithery, Gmail, Google Drive, Google Calendar, and Semantic Scholar), performs multi-turn ReAct reasoning, executes parallel tool operations, and self-audits task execution using a dynamic task checklist.
 
-When a meeting ends and a task is created, the agent:
+> [!IMPORTANT]
+> **REMOTE MCP TOOLS CONFIGURATION REQUIREMENT:**  
+> **Remote MCP tools (such as Gmail, Google Drive, Google Calendar, Slack, GitHub, etc.) MUST be added by the user. You can set up your remote MCP server endpoints using [Smithery.ai](https://smithery.ai) or any other MCP server provider/client, and add them into your `.env` file via `MCP_SERVER_URLS` and `MCP_API_TOKEN`.**
 
-1. **Retrieves** historical context from SQLite memory (past meetings, open action items)
-2. **Analyzes** the task to understand what output is needed
-3. **Routes** to the right combination of tools
-4. **Executes** tools in parallel (web search + Wikipedia + Slack + Notion + Jira)
-5. **Synthesizes** all outputs into polished, multi-format artifacts
-6. **Persists** the meeting and action items to memory for future context
-7. **Returns** markdown + HTML + calendar links + external confirmations
+---
 
-## Supported Task Types (Auto-Detected)
+## 🌟 High-Level Capabilities
 
-| Task Type | What It Produces | External Integrations |
-|---|---|---|
-| **Follow-up Email** | Personalized email using attendee names | + Slack notification |
-| **Research Brief** | Multi-source research with citations | + Notion page |
-| **Action Items** | Structured table with owners, deadlines, priorities | + Slack + Jira + Notion |
-| **Project Plan** | Action items + timeline + calendar + narrative | + Jira + Notion + Slack |
-| **Slide Deck** | Numbered outline + HTML preview | — |
-| **Calendar Event** | Real Google Calendar event (or template link) | Google Calendar API |
-| **Documentation** | PRD, spec, or technical doc with research | + Notion |
-| **Mixed** | Combines multiple outputs intelligently | All available |
+- **Dynamic ReAct Orchestrator**: Multi-turn reasoning loops using `<thinking>`, `<tool_call>`, and `<observation>` tags. Zero hardcoded routing.
+- **Multi-Server Remote MCP Discovery**: Automatically discovers remote MCP tool schemas dynamically from remote HTTP/SSE endpoints.
+- **Pure Task Audit Checklist**: Prevents premature loop termination by cross-referencing task requirements against executed tools on every step.
+- **Multi-Tier MCP Authentication**: 3-tiered authentication strategy (URL JSON mapping, positional matching, global Bearer fallback).
+- **Hybrid Context & Vector RAG Memory**: SQLite meeting persistence combined with local TF-IDF semantic vector search.
+- **Multi-Provider Failover**: Automatic failover across Google AI Studio (Gemini 3.5 & 3.1 Flash Lite), OpenRouter, Groq, OpenAI, and local Ollama.
+- **HMAC Signature Verification**: Complies with SitRep's HMAC-SHA256 request verification (`X-SitRep-Timestamp` & `X-SitRep-Signature`).
 
-## Architecture
+---
 
-```
-sitrep_agent/
-├── sdk.py              # SitRep SDK (signature verify + LLM client)
-├── database.py         # SQLite memory layer (meetings, action items, attendees)
-└── tools/
-    ├── __init__.py     # Tool registry
-    ├── base.py         # Abstract BaseTool class
-    ├── web_search.py   # DuckDuckGo search (no API key)
-    ├── web_scraper.py  # URL content extraction
-    ├── wikipedia.py    # Wikipedia REST API
-    ├── calendar.py     # Google Calendar template links (no auth)
-    ├── calendar_api.py # Google Calendar API (real events)
-    ├── email.py        # Attendee-personalized email drafter
-    ├── slides.py       # Slide outline + HTML preview
-    ├── action_items.py # Structured task extractor
-    ├── research.py     # Multi-source synthesizer
-    ├── memory.py       # SQLite memory wrapper
-    ├── slack.py        # Slack messenger
-    ├── notion.py       # Notion page creator
-    └── jira.py         # Jira ticket creator
+## 🤝 SitRep API Contract
 
-handler.py              # Intelligent orchestrator (routes + executes tools)
-app.py                  # HTTP wrapper (SitRep contract)
+SitRep POSTs to `<your-url>/run` (and `/test` for the Studio button) with the following JSON structure:
+
+```json
+{
+  "task":     { "id": "...", "title": "...", "description": "..." },
+  "summary":  "the meeting summary",
+  "attendees":[ { "id": "...", "name": "..." } ],
+  "agent":    { "instructions": "your Studio prompt", "tools": [], "model": "llama3.1" }
+}
 ```
 
-## Quick Start
+The agent responds with:
+
+```json
+{
+  "artifacts": [
+    {
+      "type": "markdown | html | link",
+      "title": "...",
+      "content": "..."
+    }
+  ],
+  "logs": ["optional log lines"]
+}
+```
+
+### Artifact Rules & Request Signing
+- `html` artifacts are sanitized by SitRep before display; `link` content must be a valid URL.
+- Requests are signed with the header `X-SitRep-Signature: sha256=<hmac(secret, "<timestamp>.<body>")>` plus `X-SitRep-Timestamp`.
+- `sitrep_agent/sdk.verify_signature()` checks this signature automatically (and is skipped when `SITREP_AGENT_SECRET` is unset for local development).
+
+---
+
+## 📂 Codebase Directory Tree
+
+```text
+.
+├── app.py                      # FastAPI HTTP entry point (/health, /run, /test)
+├── handler.py                  # Thin adapter delegating to DynamicOrchestrator
+├── render.yaml                 # Infrastructure-as-code for Render.com deployment
+├── requirements.txt            # Python dependencies
+├── DOCS/                       # Detailed Documentation Suite
+│   ├── architecture.md         # Deep-dive ReAct & Task Checklist engine architecture
+│   ├── mcp_integration.md      # Remote MCP discovery & 3-tier auth guide
+│   ├── environment_variables.md# Complete .env reference & Render setup
+│   └── testing_and_usage.md    # Local testing & HMAC signed client scripts
+└── sitrep_agent/
+    ├── orchestrator.py         # SOTA ReAct Orchestrator & Task Audit Checklist Engine
+    ├── database.py             # SQLite persistence layer for meetings & action items
+    ├── sdk.py                  # SitRep SDK (HMAC verification & multi-provider LLM client)
+    └── tools/
+        ├── __init__.py         # Central tool registry
+        ├── base.py             # Abstract BaseTool and ToolResult classes
+        ├── mcp_client.py       # Multi-server remote MCP client with 3-tier auth
+        ├── memory.py           # Historical meeting context retrieval
+        ├── vector_memory.py    # Semantic TF-IDF Vector RAG storage & search
+        ├── web_search.py       # Local DuckDuckGo web search
+        ├── web_scraper.py      # HTML text extraction tool
+        ├── wikipedia.py        # Wikipedia REST API tool
+        ├── slides.py           # Slide outline & HTML preview generator
+        ├── email.py            # Local email drafting tool
+        ├── action_items.py     # Action item extraction tool
+        ├── research.py         # Multi-source research synthesizer
+        ├── slack.py            # Slack messenger integration
+        ├── notion.py           # Notion database integration
+        ├── jira.py             # Jira issue creation integration
+        ├── calendar.py         # Google Calendar link generator
+        └── calendar_api.py     # Google Calendar API integration
+```
+
+---
+
+## ⚡ Quick Start & Testing
 
 ```bash
 # 1. Install dependencies
 pip install -r requirements.txt
 
-# 2. Configure (optional — agent works without external integrations)
+# 2. Configure environment variables
 cp .env.example .env
-# Edit .env to add your Slack, Notion, Jira, or Google Calendar credentials
 
-# 3. Run locally
-bash scripts/run-local.sh   # http://localhost:9000
-
-# 4. Smoke test (new terminal)
-bash scripts/smoke-test.sh
+# 3. Start local development server
+python3 -m uvicorn app:app --host 0.0.0.0 --port 9000
 ```
 
-## External Integrations (All Optional)
+Verify health:
+```bash
+curl http://localhost:9000/health
+# {"ok": true}
+```
 
-The agent works out of the box with zero configuration. External integrations are **opt-in**:
+### Testing via `curl`
 
-| Integration | Setup | Env Vars |
-|---|---|---|
-| **SQLite Memory** | Zero config | `MEMORY_DB_PATH` (optional) |
-| **Slack** | Webhook URL or Bot Token | `SLACK_WEBHOOK_URL` or `SLACK_BOT_TOKEN` |
-| **Notion** | Integration Token + Database ID | `NOTION_TOKEN`, `NOTION_DATABASE_ID` |
-| **Jira** | API Token + Project Key | `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PROJECT_KEY` |
-| **Google Calendar** | Service Account JSON | `GOOGLE_CALENDAR_CREDENTIALS_JSON` or `GOOGLE_CALENDAR_CREDENTIALS_PATH` |
-
-## Deploy
+#### 1. Unauthenticated Local Test (When `SITREP_AGENT_SECRET` is unset)
 
 ```bash
-# Push to GitHub, then deploy to Render (free tier)
-# render.yaml is included — just set SITREP_AGENT_SECRET in the dashboard
+curl -X POST http://localhost:9000/test \
+  -H "Content-Type: application/json" \
+  -d '{
+    "task": {
+      "id": "local_test_1",
+      "title": "Fetch financial data and send email to attendee",
+      "description": "Fetch NVIDIA market cap and send an email to user@example.com"
+    },
+    "summary": "Meeting context regarding financial records.",
+    "attendees": [{"name": "Attendee", "email": "user@example.com"}]
+  }'
 ```
 
-## Adding New Tools
+#### 2. Authenticated Production Test (HMAC Signed `curl` with Secret)
 
-The tool system is fully modular:
+```bash
+SECRET="YOUR_SITREP_AGENT_SECRET_HERE"
+URL="https://your-app.onrender.com/test"
+PAYLOAD='{"task":{"id":"prod_test_1","title":"Fetch financial data and send email","description":"Fetch NVIDIA financial data and email user@example.com"},"summary":"Meeting context","attendees":[{"name":"Attendee","email":"user@example.com"}]}'
 
-1. Create `sitrep_agent/tools/your_tool.py`
-2. Inherit from `BaseTool`, implement `execute()`
-3. Register in `sitrep_agent/tools/__init__.py`
-4. Add routing logic in `handler.py`
+TS=$(date +%s)
+SIG="sha256="$(echo -n "${TS}.${PAYLOAD}" | openssl dgst -sha256 -hmac "${SECRET}" | awk '{print $2}')
 
-## Environment Variables
+curl -X POST "${URL}" \
+  -H "Content-Type: application/json" \
+  -H "X-SitRep-Timestamp: ${TS}" \
+  -H "X-SitRep-Signature: ${SIG}" \
+  -d "${PAYLOAD}"
+```
 
-| Variable | Default | Description |
-|---|---|---|
-| `SITREP_AGENT_SECRET` | *(none)* | Agent signing secret from SitRep Studio |
-| `LLM_BASE_URL` | `http://localhost:11434/v1` | LLM API endpoint |
-| `LLM_API_KEY` | *(none)* | API key (required for hosted providers) |
-| `MODEL` | `llama3.2:1b` | Model name |
-| `MEMORY_DB_PATH` | `./agent_memory.db` | SQLite database path |
-| `SLACK_WEBHOOK_URL` | *(none)* | Slack incoming webhook |
-| `SLACK_BOT_TOKEN` | *(none)* | Slack bot OAuth token |
-| `NOTION_TOKEN` | *(none)* | Notion integration token |
-| `NOTION_DATABASE_ID` | *(none)* | Notion database ID |
-| `JIRA_BASE_URL` | *(none)* | Jira Cloud base URL |
-| `JIRA_EMAIL` | *(none)* | Jira account email |
-| `JIRA_API_TOKEN` | *(none)* | Jira API token |
-| `JIRA_PROJECT_KEY` | *(none)* | Default Jira project key |
-| `GOOGLE_CALENDAR_CREDENTIALS_JSON` | *(none)* | Base64-encoded service account JSON |
+---
 
-## License
+## 📚 Detailed Documentation Index
 
-MIT
+For in-depth technical documentation, refer to the guides in the `DOCS/` folder:
+
+- 🏛 [Architecture & Core Engine](DOCS/architecture.md): SOTA ReAct loop, Dynamic Task Audit Checklist, and vector RAG design.
+- 🌐 [Remote MCP Integration Guide](DOCS/mcp_integration.md): Auto-discovery, 3-tier authentication strategies, and remote tool suites.
+- ⚙️ [Environment Variables & Deployment](DOCS/environment_variables.md): Detailed `.env` reference and Render.com setup guide.
+- 🧪 [Testing & Verification Guide](DOCS/testing_and_usage.md): Testing unauthenticated and HMAC-signed requests locally and in production.
+
+---
+
+## 📜 License
+
+MIT License. Developed for the SitRep Agent Ecosystem.
